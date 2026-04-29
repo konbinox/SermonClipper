@@ -493,35 +493,40 @@ def extract_sermon_mode(transcript: List[Dict], topics: List[Dict], target_secon
     return selected
 
 
-def extract_teaching_mode(transcript: List[Dict], description: str, scriptures: List[str], 
+def extract_teaching_mode(transcript: List[Dict], description: str, scriptures: List[str],
                            target_seconds: int, log_callback=None) -> List[Dict]:
+    """授课模式：累积选取片段直到满额"""
     if log_callback:
         log_callback("\n📚 授课模式提取...")
-    
+
     if not transcript:
         return []
-    
+
     total_duration = transcript[-1]['end']
+    # 将视频按时间均匀切分成几个大段
     segment_count = max(3, min(8, target_seconds // 30))
     slice_size = total_duration / segment_count
+    # 每个大段的目标时长
     per_slice_target = target_seconds // segment_count
-    
+
     if log_callback:
         log_callback(f"   视频总时长: {total_duration/60:.1f} 分钟")
         log_callback(f"   目标时长: {target_seconds} 秒")
-        log_callback(f"   切分为 {segment_count} 个段落")
-    
+        log_callback(f"   切分为 {segment_count} 个段落，每段目标 {per_slice_target} 秒")
+
     selected = []
     total = 0
-    
+
     for i in range(segment_count):
+        # 定义第 i 个大段的时间范围
         start = i * slice_size
         end = (i + 1) * slice_size
         slice_segments = [s for s in transcript if start <= s['start'] < end]
-        
+
         if not slice_segments:
             continue
-        
+
+        # 1. 给这个大段里的每个小片段打分
         scored = []
         for seg in slice_segments:
             score = 0
@@ -532,43 +537,54 @@ def extract_teaching_mode(transcript: List[Dict], description: str, scriptures: 
                 if s in text:
                     score += 20
             scored.append((seg, score))
-        
+
+        # 2. 按分数从高到低排序
         scored.sort(key=lambda x: x[1], reverse=True)
-        
-        if scored:
-            best = scored[0][0]
-            dur = best['end'] - best['start']
-            if total + dur <= target_seconds:
-                selected.append(best)
+
+        # 3. 关键改动：在这个大段内，从高分到低分，**累积选取**片段，直到凑满 `per_slice_target` 秒
+        topic_total = 0
+        for seg, score in scored:
+            dur = seg['end'] - seg['start']
+            if topic_total + dur <= per_slice_target:
+                selected.append(seg)
+                topic_total += dur
                 total += dur
                 if log_callback:
-                    log_callback(f"   段落 {i+1}: 选取 {dur:.0f}s")
-            elif total < target_seconds:
-                remaining = target_seconds - total
-                if remaining >= 10:
-                    partial = best.copy()
-                    partial['end'] = best['start'] + remaining
+                    log_callback(f"   段落 {i+1}: 选取片段 {dur:.0f}s (累计 {topic_total:.0f}/{per_slice_target}s)")
+            elif topic_total < per_slice_target:
+                remaining = per_slice_target - topic_total
+                if remaining >= 3:
+                    # 如果最后一个片段太长，就只取一部分
+                    partial = seg.copy()
+                    partial['end'] = seg['start'] + remaining
                     selected.append(partial)
-                    total = target_seconds
+                    topic_total += remaining
+                    total += remaining
                     if log_callback:
                         log_callback(f"   段落 {i+1}: 部分取用 {remaining:.0f}s")
                     break
-        
+            if topic_total >= per_slice_target:
+                break
+
         if total >= target_seconds:
             break
-    
-    # 保底：直接按时序取
-    if len(selected) == 0 and transcript:
+
+    # 4. 如果所有大段处理完，总时长还不够，就从视频开头按顺序补充片段
+    if total < target_seconds:
         if log_callback:
-            log_callback(f"   ⚠️ 未匹配，按时序提取...")
-        for seg in transcript[:30]:
+            log_callback(f"   📝 总时长不足，从视频中补充...")
+        remaining = target_seconds - total
+        transcript_sorted = sorted(transcript, key=lambda x: x['start'])
+        for seg in transcript_sorted:
+            if seg in selected:
+                continue
             dur = seg['end'] - seg['start']
             if total + dur <= target_seconds:
                 selected.append(seg)
                 total += dur
             elif total < target_seconds:
                 remaining = target_seconds - total
-                if remaining >= 5:
+                if remaining >= 3:
                     partial = seg.copy()
                     partial['end'] = seg['start'] + remaining
                     selected.append(partial)
@@ -576,12 +592,12 @@ def extract_teaching_mode(transcript: List[Dict], description: str, scriptures: 
                 break
             if total >= target_seconds:
                 break
-    
+
     selected.sort(key=lambda x: x['start'])
-    
+
     if log_callback:
         log_callback(f"\n   ✅ 授课模式完成：{len(selected)}段，{total:.0f}/{target_seconds}秒")
-    
+
     return selected
 
 
